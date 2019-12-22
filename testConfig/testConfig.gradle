@@ -46,6 +46,10 @@ remotes.create('remoteWorkerServer') {
     knownHosts = allowAnyHosts
 }
 
+task jar(type: GradleBuild) {
+    dir = file('../kafka-marklogic-connector')
+    tasks = ['jar']
+}
 
 task kafkaDeployConnectorRemoteServer {
     doLast {
