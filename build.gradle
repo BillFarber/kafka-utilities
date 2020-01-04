@@ -1,28 +1,179 @@
+buildscript {
+    repositories {
+        jcenter()
+    }
+    dependencies {
+        classpath 'org.hidetake:gradle-ssh-plugin:2.10.1'
+    }
+}
+
 plugins {
-    id 'net.saliman.properties' version '1.4.6'
-    id "com.github.jk1.dependency-license-report" version "1.3"
+    id 'net.saliman.properties' version '1.5.1'
+    id 'org.hidetake.ssh' version '2.10.1'
 }
 
-repositories {
-    mavenCentral()
-    jcenter()
+apply plugin: 'org.hidetake.ssh'
+
+def tmpConfigsDir = "workingConfigs"
+def projectProps = new Properties()
+file("gradle.properties").withInputStream { projectProps.load(it) }
+def version = projectProps.getProperty("version")
+def kafkaMarklogicConnectorHome = projectProps.getProperty("kafkaMarklogicConnectorHome")
+
+// Build the list of various servers
+if (project.hasProperty('remoteKafkaBrokers')) {
+    for (server in remoteKafkaBrokers.split(',')) {
+        remotes.create(server) {
+            role 'kafkaBroker'
+            host = server
+            user = remoteUser
+            identity = file("remoteKeys/${remoteKey}")
+            knownHosts = allowAnyHosts
+        }
+    }
+    for (server in remoteConnectorServers.split(',')) {
+        remotes.create(server) {
+            role 'connectorServer'
+            host = server
+            user = remoteUser
+            identity = file("remoteKeys/${remoteKey}")
+            knownHosts = allowAnyHosts
+        }
+    }
+    remotes.create('remoteWorkerServer') {
+        role 'remoteWorkerServer'
+        host = remoteWorkerServer
+        user = remoteUser
+        identity = file("remoteKeys/${remoteKey}")
+        knownHosts = allowAnyHosts
+    }
 }
 
-configurations {
-    documentation
-    assets
-}
-
-dependencies {
-    documentation files('LICENSE.txt')
-    documentation files('NOTICE.txt')
-    documentation files('README.md')
-
-    assets files('MarkLogic_logo.png')
-    assets files('apache_logo.png')
+task clean(type: GradleBuild) {
+    dir = file(kafkaMarklogicConnectorHome)
+    tasks = ['clean']
 }
 
 task jar(type: GradleBuild) {
-    dir = file('../kafka-marklogic-connector')
+    dir = file(kafkaMarklogicConnectorHome)
     tasks = ['jar']
+}
+
+task connectorArchive(type: GradleBuild) {
+    dir = file(kafkaMarklogicConnectorHome)
+    tasks = ['connectorArchive']
+}
+
+task kafkaDeployConnectorRemoteServer() {
+    doLast {
+        ssh.run {
+            session(remotes.role('connectorServer')) {
+                put from: "${kafkaMarklogicConnectorHome}/build/libs/kafka-connect-marklogic-${version}.jar", into: remoteKafkaLibsDir
+            }
+        }
+    }
+}
+
+task copyAndFilterSinkConfig(type: Copy) {
+    outputs.upToDateWhen { false }
+    from "${kafkaMarklogicConnectorHome}/config/marklogic-sink.properties"
+    into tmpConfigsDir
+    filter { line -> line
+            .replaceAll('topics=marklogic', "topics=${kafkaTopics}")
+            .replaceAll('ml.connection.host=localhost', "ml.connection.host=${mlHost}")
+            .replaceAll('ml.connection.port=8000', "ml.connection.port=${mlPort}")
+            .replaceAll('ml.connection.database=Documents', "ml.connection.database=${mlDatabase}")
+    }
+}
+
+task copyAndFilterConnectConfig(type: Copy) {
+    outputs.upToDateWhen { false }
+    from "${kafkaMarklogicConnectorHome}/config/marklogic-connect-standalone.properties"
+    into tmpConfigsDir
+    filter { line -> line
+            .replaceAll('bootstrap.servers=localhost:9092', "bootstrap.servers=${remoteKafkaBrokers}")
+    }
+}
+
+task kafkaDeployConfigsRemoteServer(dependsOn: [copyAndFilterSinkConfig,copyAndFilterConnectConfig]) {
+    doLast {
+        ssh.run {
+            session(remotes.role('connectorServer')) {
+                put from: "${tmpConfigsDir}/marklogic-connect-standalone.properties", into: remoteConnectorConfigDir
+                put from: "${tmpConfigsDir}/marklogic-sink.properties", into: remoteConnectorConfigDir
+            }
+        }
+    }
+}
+
+task kafkaStopRemoteServer {
+    doLast {
+        ssh.run {
+            session(remotes.role('kafkaBroker')) {
+                // Execute a command
+                def stopResult = execute 'sudo /opt/bitnami/kafka/bin/kafka-server-stop.sh ; sudo rm -rf /opt/bitnami/kafka/tmp/kafka-logs/* ; sudo rm -rf /opt/bitnami/kafka/logs/*'
+
+                // Also Groovy methods or properties are available in a session closure
+                println stopResult
+            }
+        }
+    }
+}
+
+task kafkaStartRemoteServer {
+    doLast {
+        ssh.run {
+            session(remotes.role('kafkaBroker')) {
+                // Execute a command
+                def startResult = execute 'sudo /opt/bitnami/kafka/bin/kafka-server-start.sh -daemon /opt/bitnami/kafka/config/server.properties'
+
+                // Also Groovy methods or properties are available in a session closure
+                println startResult
+            }
+        }
+    }
+}
+
+task kafkaShowLast200LinesRemoteServerLogs {
+    doLast {
+        ssh.run {
+            session(remotes.role('kafkaBroker')) {
+                def logResult = execute 'tail -200 /opt/bitnami/kafka/logs/server.log'
+                println logResult
+            }
+        }
+    }
+}
+
+task kafkaTailRemoteServerLogs {
+    doLast {
+        ssh.run {
+            session(remotes.role('kafkaBroker')) {
+                def logResult = execute 'tail -n 200 -f /opt/bitnami/kafka/logs/server.log'
+                println logResult
+            }
+        }
+    }
+}
+
+task kafkaRunMessageProducer {
+    doLast {
+        ssh.run {
+            session(remotes.remoteWorkerServer) {
+                def logResult = execute "java -jar /home/bitnami/kafka-producer-1.0-SNAPSHOT.jar -t ${producerTopic} -m ${producerMessagePerThread} -c ${producerThreadCount} -h ${producerZookeeperHost}:${producerZookeeperPort} -n ${producerNullMessages}"
+                println logResult
+            }
+        }
+    }
+}
+
+task kafkaRunConnector {
+    doLast {
+        ssh.run {
+            session(remotes.remoteWorkerServer) {
+                def logResult = execute "/opt/bitnami/kafka/bin/connect-standalone.sh /opt/bitnami/kafka/config/marklogic-connect-standalone.properties /opt/bitnami/kafka/config/marklogic-sink.properties"
+                println logResult
+            }
+        }
+    }
 }
