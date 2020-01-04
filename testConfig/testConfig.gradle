@@ -18,14 +18,15 @@ def tmpConfigsDir = "tmpConfigsDir"
 def projectProps = new Properties()
 file("../gradle.properties").withInputStream { projectProps.load(it) }
 def version = projectProps.getProperty("version")
+def kafkaMarklogicConnectorHome = projectProps.getProperty("kafkaMarklogicConnectorHome")
 
 // Build the list of various servers
 for (server in remoteKafkaBrokers.split(',')) {
     remotes.create(server) {
         role 'kafkaBroker'
         host = server
-        user = 'bitnami'
-        identity = file('kafka.pem')
+        user = remoteUser
+        identity = file(remoteKey)
         knownHosts = allowAnyHosts
     }
 }
@@ -33,16 +34,16 @@ for (server in remoteConnectorServers.split(',')) {
     remotes.create(server) {
         role 'connectorServer'
         host = server
-        user = 'bitnami'
-        identity = file('kafka.pem')
+        user = remoteUser
+        identity = file(remoteKey)
         knownHosts = allowAnyHosts
     }
 }
 remotes.create('remoteWorkerServer') {
     role 'remoteWorkerServer'
     host = remoteWorkerServer
-    user = 'bitnami'
-    identity = file('kafka.pem')
+    user = remoteUser
+    identity = file(remoteKey)
     knownHosts = allowAnyHosts
 }
 
@@ -51,19 +52,19 @@ task jar(type: GradleBuild) {
     tasks = ['jar']
 }
 
-task kafkaDeployConnectorRemoteServer {
+task kafkaDeployConnectorRemoteServer() {
     doLast {
         ssh.run {
             session(remotes.role('connectorServer')) {
-                put from: "build/libs/kafka-connect-marklogic-${version}.jar", into: remoteKafkaLibsDir
+                put from: "${kafkaMarklogicConnectorHome}/build/libs/kafka-connect-marklogic-${version}.jar", into: remoteKafkaLibsDir
             }
         }
     }
 }
 
-task copyAndFilterConfigs(type: Copy) {
+task copyAndFilterSinkConfig(type: Copy) {
     outputs.upToDateWhen { false }
-    from '../config/marklogic-sink.properties'
+    from '../../kafka-marklogic-connector/config/marklogic-sink.properties'
     into tmpConfigsDir
     filter { line -> line
             .replaceAll('topics=marklogic', "topics=${kafkaTopics}")
@@ -73,10 +74,20 @@ task copyAndFilterConfigs(type: Copy) {
     }
 }
 
-task kafkaDeployConfigsRemoteServer(dependsOn: copyAndFilterConfigs) {
+task copyAndFilterConnectConfig(type: Copy) {
+    outputs.upToDateWhen { false }
+    from '../../kafka-marklogic-connector/config/marklogic-connect-standalone.properties'
+    into tmpConfigsDir
+    filter { line -> line
+            .replaceAll('bootstrap.servers=localhost:9092', "bootstrap.servers=${remoteKafkaBrokers}")
+    }
+}
+
+task kafkaDeployConfigsRemoteServer(dependsOn: [copyAndFilterSinkConfig,copyAndFilterConnectConfig]) {
     doLast {
         ssh.run {
             session(remotes.role('connectorServer')) {
+                put from: "testConfig/${tmpConfigsDir}/marklogic-connect-standalone.properties", into: remoteConnectorConfigDir
                 put from: "testConfig/${tmpConfigsDir}/marklogic-sink.properties", into: remoteConnectorConfigDir
             }
         }
