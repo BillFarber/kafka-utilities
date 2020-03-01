@@ -64,16 +64,6 @@ task connectorArchive(type: GradleBuild) {
     tasks = ['connectorArchive']
 }
 
-task kafkaDeployConnectorRemoteServer() {
-    doLast {
-        ssh.run {
-            session(remotes.role('connectorServer')) {
-                put from: "${kafkaMarklogicConnectorHome}/build/libs/kafka-connect-marklogic-${version}.jar", into: remoteKafkaLibsDir
-            }
-        }
-    }
-}
-
 task copyAndFilterSinkConfig(type: Copy) {
     outputs.upToDateWhen { false }
     from "${kafkaMarklogicConnectorHome}/config/marklogic-sink.properties"
@@ -95,7 +85,17 @@ task copyAndFilterConnectConfig(type: Copy) {
     }
 }
 
-task kafkaDeployConfigsRemoteServer(dependsOn: [copyAndFilterSinkConfig,copyAndFilterConnectConfig]) {
+task kafkaDeployConnectorRemoteServer() {
+    doLast {
+        ssh.run {
+            session(remotes.role('connectorServer')) {
+                put from: "${kafkaMarklogicConnectorHome}/build/libs/kafka-connect-marklogic-${version}.jar", into: remoteKafkaLibsDir
+            }
+        }
+    }
+}
+
+task kafkaDeployConnectorConfigsRemoteServer(dependsOn: [copyAndFilterSinkConfig,copyAndFilterConnectConfig]) {
     doLast {
         ssh.run {
             session(remotes.role('connectorServer')) {
@@ -172,6 +172,40 @@ task kafkaRunConnector {
         ssh.run {
             session(remotes.remoteWorkerServer) {
                 def logResult = execute "/opt/bitnami/kafka/bin/connect-standalone.sh /opt/bitnami/kafka/config/marklogic-connect-standalone.properties /opt/bitnami/kafka/config/marklogic-sink.properties"
+                println logResult
+            }
+        }
+    }
+}
+
+
+// Source Tasks
+task kafkaDeploySourceRemoteServer() {
+    doLast {
+        println remotes
+        ssh.run {
+            session(remotes.role('remoteWorkerServer')) {
+                put from: "${kafkaMarklogicSourceHome}/build/libs/kafka-marklogic-source-${sourceVersion}.jar", into: remoteKafkaBitnamiHomeDir
+            }
+        }
+    }
+}
+
+task kafkaDeploySourceConfigsRemoteServer() {
+    doLast {
+        ssh.run {
+            session(remotes.role('remoteWorkerServer')) {
+                put from: "${kafkaMarklogicSourceHome}/config/kafkaSource.properties", into: remoteKafkaBitnamiHomeDir
+            }
+        }
+    }
+}
+
+task kafkaRunSourceOnRemoteServer {
+    doLast {
+        ssh.run {
+            session(remotes.remoteWorkerServer) {
+                def logResult = execute "java -jar /home/bitnami/kafka-marklogic-source-${sourceVersion}.jar kafkaSource.properties"
                 println logResult
             }
         }
